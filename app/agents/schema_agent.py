@@ -1,80 +1,141 @@
 import logging, os, json
 from langchain_chroma import Chroma
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
+
 from app.config import embeddings, llm
 from app.state.agent_state import GlobalState
 from app.utils import extract_schema_from_db, BASE_DIR, DB_PATH
 
-# Dynamic DB path (portable)
+# ------------------------------------------------------------
+# Paths & Caching
+# ------------------------------------------------------------
 CHROMA_PATH = os.path.join(BASE_DIR, "chroma_schema_index")
-
-# Cache
 _vectorstore = None
 
 
-def build_schema_index(schema_docs):
-    """Creates and persists Chroma index for schema documents."""
-    if not schema_docs or len(schema_docs) == 0:
-        raise ValueError("No schema documents to index.")
+# ------------------------------------------------------------
+# Pydantic Structured Schema Summary
+# ------------------------------------------------------------
+class SchemaSummary(BaseModel):
+    key_tables: list[str] = Field(..., description="List of the most relevant tables for this query.")
+    key_columns: list[str] = Field(..., description="Important columns mentioned or implied by the query.")
+    relationships: str = Field(..., description="How the tables are related or joined.")
+    summary_text: str = Field(..., description="A concise human-readable summary of schema relevance.")
 
+
+# ------------------------------------------------------------
+# Helper to (Re)Build Schema Index
+# ------------------------------------------------------------
+def build_schema_index(schema_docs):
+    """Creates and persists a Chroma vector index for schema documents."""
+    if not schema_docs:
+        raise ValueError("No schema documents to index.")
     logging.info(f"🔧 Building Chroma index for {len(schema_docs)} schema docs...")
     vectorstore = Chroma.from_documents(
         documents=schema_docs,
         embedding=embeddings,
-        persist_directory=CHROMA_PATH
+        persist_directory=CHROMA_PATH,
     )
     logging.info("✅ Schema index built and persisted.")
     return vectorstore
 
 
+# ------------------------------------------------------------
+# Schema Agent Node
+# ------------------------------------------------------------
 async def schema_agent_node(state: GlobalState) -> GlobalState:
-    """Retrieves schema context using Chroma vectorstore and updates state."""
-    global _vectorstore
+    """
+    Schema Agent:
+    - Retrieves the most relevant schema context from Chroma.
+    - Summarizes it with the LLM into structured schema info.
+    """
 
+    global _vectorstore
     query = state.get("rewritten_query") or state.get("original_query")
+
     if not query:
         raise ValueError("Missing rewritten_query or original_query in GlobalState")
 
-    # Load or build vectorstore
+    # Load or rebuild Chroma index
     if _vectorstore is None:
         logging.info("📦 Loading Chroma index...")
         try:
             _vectorstore = Chroma(
                 persist_directory=CHROMA_PATH,
-                embedding_function=embeddings
+                embedding_function=embeddings,
             )
             if _vectorstore._collection.count() == 0:
-                raise ValueError("Empty Chroma DB, rebuilding...")
+                raise ValueError("Empty Chroma index; rebuilding...")
         except Exception as e:
-            logging.warning(f"⚠️ Rebuilding Chroma due to: {e}")
+            logging.warning(f"⚠️ Rebuilding Chroma index due to: {e}")
             schema_docs = extract_schema_from_db(DB_PATH)
             _vectorstore = build_schema_index(schema_docs)
 
-    # Retrieve relevant schema
+    # Retrieve relevant schema documents
     retriever = _vectorstore.as_retriever(search_kwargs={"k": 3})
     results = retriever.invoke(query)
 
-    schema_context = "\n".join([doc.page_content for doc in results])
-    table_names = [doc.metadata.get("source", "unknown") for doc in results]
+    # ---- Normalize metadata + build schema context ----
+    rag_docs = []
+    for doc in results:
+        table_name = (
+            doc.metadata.get("table_name")
+            or doc.metadata.get("source")
+            or "unknown"
+        )
+        # Normalize metadata
+        rag_docs.append({
+            "text": doc.page_content,
+            "metadata": {"table_name": table_name}
+        })
 
-    # Summarize schema context
+    # ✅ Dynamically sync relevant tables with normalized RAG docs
+    relevant_tables = [doc["metadata"]["table_name"] for doc in rag_docs]
+    schema_context = "\n".join([doc["text"] for doc in rag_docs])
+
+    logging.info(f"📚 Retrieved schema context from {len(results)} docs: {relevant_tables}")
+
+    # --- Structured schema summarization via LLM ---
+    parser = PydanticOutputParser(pydantic_object=SchemaSummary)
+
     schema_prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a database schema summarizer."),
-        ("human", f"Schema context:\n{schema_context}\n\nUser query: {query}\nSummarize key tables and relations.")
+        (
+            "system",
+            "You are a database schema summarizer. Summarize key tables, columns, and relationships.\n"
+            "Return your output in strict JSON according to this format:\n{format_instructions}",
+        ),
+        (
+            "human",
+            "User Query:\n{query}\n\nSchema Context:\n{schema_context}",
+        ),
     ])
-    chain = schema_prompt | llm
-    summary_result = await chain.ainvoke({})
-    schema_summary = summary_result.content.strip()
 
+    chain = schema_prompt | llm | parser
+
+    try:
+        summary: SchemaSummary = await chain.ainvoke({
+            "query": query,
+            "schema_context": schema_context,
+            "format_instructions": parser.get_format_instructions(),
+        })
+        schema_summary_text = summary.summary_text.strip()
+    except Exception as e:
+        logging.error(f"⚠️ Schema summarization failed: {e}")
+        summary = None
+        schema_summary_text = f"Error generating schema summary: {str(e)}"
+
+    # ---- Update GlobalState ----
     new_state = state.copy()
     new_state.update({
         "schema_context": schema_context,
-        "relevant_tables": table_names,
-        "rag_docs": [{"text": d.page_content} for d in results],
-        "schema_summary": schema_summary,
-        "status": "schema_retrieved"
+        "relevant_tables": relevant_tables,
+        "rag_docs": rag_docs,
+        "schema_summary": schema_summary_text,
+        "structured_schema": summary.dict() if summary else {},
+        "status": "schema_retrieved",
     })
 
-    logging.info(f"✅ Schema Agent retrieved tables: {new_state}")
-
+    logging.info("✅ Schema Agent successfully retrieved and summarized schema.")
     return new_state

@@ -1,4 +1,6 @@
 import logging
+
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END
 
 from app.agents.query_rewriter_agent import query_rewriter_node
@@ -11,7 +13,7 @@ from app.agents.explainability_agent import explainability_node
 from app.state.agent_state import GlobalState
 
 
-def build_text_to_sql_graph() -> StateGraph:
+def build_text_to_sql_graph():
     """
     Builds a sequential Text-to-SQL workflow.
     Each agent runs in a fixed order:
@@ -50,5 +52,8 @@ def build_text_to_sql_graph() -> StateGraph:
     # --- Define start and finish points ---
     graph.set_entry_point("query_rewriter_node")
 
+    memory = MemorySaver()
+
+    compiled_graph = graph.compile(checkpointer=memory)
     logging.info("✅ Sequential Text-to-SQL workflow graph built successfully.")
-    return graph
+    return compiled_graph

@@ -1,75 +1,99 @@
-import json, re, logging
+import logging
 from datetime import datetime
 
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
 
 from app.state.agent_state import GlobalState
 from app.config import llm
 
-# Prompt for rewriting
-rewriter_system = """You are a query rewriter for a Text-to-SQL system.
-Your task is to rewrite natural-language queries into clear, SQL-friendly questions.
-- Preserve user intent.
-- Use placeholders like <DATE_RANGE> if needed.
-- Return JSON with: rewritten_query, explanation, metadata.
-"""
 
+# ------------------------------------------------------------
+# 🧩 Define structured output model
+# ------------------------------------------------------------
+class QueryRewriteOutput(BaseModel):
+    rewritten_query: str = Field(..., description="Rewritten SQL-friendly version of the query.")
+    explanation: str = Field(..., description="Explanation of how and why the query was rewritten.")
+    metadata: dict = Field(default_factory=dict, description="Optional metadata or notes.")
+
+
+# ------------------------------------------------------------
+# 🧠 Define prompt
+# ------------------------------------------------------------
 rewriter_prompt = ChatPromptTemplate.from_messages([
-    ("system", rewriter_system),
-    ("human", 'Original user question: "{query}"\nReturn JSON as instructed.')
+    (
+        "system",
+        """You are an expert query rewriter for a Text-to-SQL assistant.
+Your job is to rewrite user natural-language queries into SQL-friendly questions.
+
+Guidelines:
+- Keep the user's original intent intact.
+- Be explicit about filters, aggregations, or date ranges.
+- If needed, use placeholders like <DATE_RANGE>.
+- Respond ONLY in structured JSON as instructed below.
+
+{format_instructions}
+"""
+    ),
+    (
+        "human",
+        "Original user question: \"{query}\""
+    ),
 ])
 
+
 # ------------------------------------------------------------
-# Query Rewriter Node (LangGraph compatible)
+# 🚀 Query Rewriter Node
 # ------------------------------------------------------------
 async def query_rewriter_node(state: GlobalState) -> GlobalState:
-    """Query Rewriter Agent using the shared GlobalState."""
+    """Query Rewriter Agent (safe structured version)."""
     query = state.get("original_query", "").strip()
     if not query:
-        raise ValueError("Missing original_query in GlobalState")
+        raise ValueError("Missing 'original_query' in GlobalState")
 
-    chain = rewriter_prompt | llm
-    result = await chain.ainvoke({"query": query})
-    text = result.content.strip()
+    logging.info("🔁 Rewriting user query...")
 
-    # Try parsing JSON safely
-    match = re.search(r"\{[\s\S]*\}", text)
-    json_str = match.group(0) if match else text
+    # Setup structured parser
+    parser = PydanticOutputParser(pydantic_object=QueryRewriteOutput)
+
+    # Build chain
+    chain = rewriter_prompt | llm | parser
+
     try:
-        parsed = json.loads(json_str)
-    except Exception:
-        parsed = {"rewritten_query": text, "explanation": "parse-fallback", "metadata": {}}
+        result: QueryRewriteOutput = await chain.ainvoke({
+            "query": query,
+            "format_instructions": parser.get_format_instructions(),
+        })
+    except Exception as e:
+        logging.error(f"⚠️ Parsing or LLM error: {e}")
+        # Fallback to raw LLM result if parser fails
+        result = QueryRewriteOutput(
+            rewritten_query=query,
+            explanation=f"Parser failed — returning original query. ({e})",
+            metadata={}
+        )
 
-    rewritten = parsed.get("rewritten_query", query).strip()
-    explanation = parsed.get("explanation", "")
-    metadata = parsed.get("metadata", {})
-
-    # Build new state
+    # Update history
     history = state.get("rewrite_history", [])
     history.append({
         "time": datetime.utcnow().isoformat(),
-        "model": llm.model,
+        "model": getattr(llm, "model", "unknown"),
         "input": query,
-        "output": rewritten,
-        "explanation": explanation,
-        "metadata": metadata
+        "output": result.rewritten_query,
+        "explanation": result.explanation,
+        "metadata": result.metadata,
     })
 
+    # Build new state
     new_state = state.copy()
     new_state.update({
-        "rewritten_query": rewritten,
+        "rewritten_query": result.rewritten_query,
+        "rewrite_explanation": result.explanation,
+        "rewrite_metadata": result.metadata,
         "rewrite_history": history,
-        "rewrite_explanation": explanation,
         "status": "query_rewritten",
     })
 
-    logging.info(f"✅ Query rewritten: {rewritten}")
+    logging.info(f"✅ Query rewritten: {result.rewritten_query}")
     return new_state
-
-
-async def decide_if_rewrite(state: GlobalState) -> GlobalState:
-    q = state.get("original_query", "")
-    tokens = len(q.split())
-    has_sql_terms = any(w in q.lower() for w in ["select", "from", "where", "join", "table", "column"])
-    needs_rewrite = tokens < 6 or not has_sql_terms
-    return {**state, "needs_rewrite": needs_rewrite}

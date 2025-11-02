@@ -1,17 +1,31 @@
 import logging
 from datetime import datetime
 
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
 
 from app.config import llm
 from app.state.agent_state import GlobalState
 
 
+# ------------------------------------------------------------
+# 🧩 Structured Output Schema
+# ------------------------------------------------------------
+class ExplanationOutput(BaseModel):
+    query_purpose: str = Field(..., description="A short, clear summary of what the SQL query is doing.")
+    data_insights: str = Field(..., description="Key findings, insights, or observations from the result sample.")
+    summary: str = Field(..., description="A concise overall summary suitable for end users.")
+
+
+# ------------------------------------------------------------
+# 🧠 Explainability Node
+# ------------------------------------------------------------
 async def explainability_node(state: GlobalState) -> GlobalState:
     """
     Explainability Agent:
-    - Converts SQL and query results into plain-language insights.
-    - Helps users understand what the SQL does and what the data means.
+    - Explains what the SQL query does and summarizes its results.
+    - Returns structured natural language outputs using Pydantic parsing.
     """
 
     sql_query = state.get("validated_sql") or state.get("generated_sql")
@@ -22,42 +36,59 @@ async def explainability_node(state: GlobalState) -> GlobalState:
     if not execution_result:
         raise ValueError("Missing execution results to explain.")
 
-    logging.info("🧠 Generating natural language explanation for SQL and results...")
+    logging.info("🧠 Generating structured natural language explanation for SQL and results...")
 
-    # Use only top 5 rows to keep prompt short
+    # Use only top 5 rows to keep context compact
     sample_rows = execution_result.get("rows", [])[:5]
 
+    # --- Prompt setup ---
+    parser = PydanticOutputParser(pydantic_object=ExplanationOutput)
+
     explain_prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are an expert data analyst who explains SQL queries and results in simple, plain language.\n"
-         "Focus on clarity and insight — describe what the query does and what the results mean."),
-        ("human",
-         "SQL Query:\n{sql_query}\n\n"
-         "Sample of Query Results (first 5 rows):\n{sample_rows}\n\n"
-         "Explain in natural language:\n"
-         "1. What does this SQL query do?\n"
-         "2. What are the main insights or patterns visible in the results?")
+        (
+            "system",
+            """You are a senior data analyst who explains SQL queries and their results in simple, clear language.
+Return your response strictly in JSON format according to the following structure:
+{format_instructions}
+
+Guidelines:
+- Be precise but simple.
+- Avoid technical SQL jargon.
+- Include both what the query does and what the results imply."""
+        ),
+        (
+            "human",
+            "SQL Query:\n{sql_query}\n\n"
+            "Sample Query Results (first 5 rows):\n{sample_rows}"
+        ),
     ])
 
-    chain = explain_prompt | llm
+    chain = explain_prompt | llm | parser
 
     try:
-        response = await chain.ainvoke({
+        result: ExplanationOutput = await chain.ainvoke({
             "sql_query": sql_query,
-            "sample_rows": sample_rows
+            "sample_rows": sample_rows,
+            "format_instructions": parser.get_format_instructions(),
         })
-        explanation_text = response.content.strip()
+
+        explanation_text = (
+            f"### 🧩 What the Query Does:\n{result.query_purpose}\n\n"
+            f"### 📊 Key Insights:\n{result.data_insights}\n\n"
+            f"### 📝 Summary:\n{result.summary}"
+        )
+
     except Exception as e:
-        logging.error(f"⚠️ Failed to generate explanation: {e}")
-        explanation_text = f"Error generating explanation: {str(e)}"
+        logging.error(f"⚠️ Failed to generate structured explanation: {e}")
+        explanation_text = f"Error generating structured explanation: {str(e)}"
 
     # ---- Record History ----
     explanation_history = state.get("explanation_history", [])
     explanation_history.append({
         "time": datetime.utcnow().isoformat(),
         "sql": sql_query,
-        "explanation": explanation_text,
-        "rows_used": len(sample_rows)
+        "rows_used": len(sample_rows),
+        "explanation": explanation_text
     })
 
     # ---- Update GlobalState ----
@@ -68,5 +99,5 @@ async def explainability_node(state: GlobalState) -> GlobalState:
         "status": "explained"
     })
 
-    logging.info("✅ Explainability Agent successfully generated explanation.")
+    logging.info("✅ Structured explainability successfully generated.")
     return new_state
