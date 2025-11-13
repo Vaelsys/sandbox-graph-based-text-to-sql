@@ -13,7 +13,7 @@ from app.state.agent_state import GlobalState
 # 🧩 Structured Output Schema
 # ------------------------------------------------------------
 class SQLGenerationOutput(BaseModel):
-    sql: str = Field(..., description="A valid SQLite-compatible SELECT query.")
+    sql: str = Field(..., description="A valid PostgreSQL-compatible SELECT query.")
     explanation: str = Field(..., description="Short reasoning behind how the SQL answers the query.")
 
 
@@ -24,13 +24,14 @@ generation_prompt = ChatPromptTemplate.from_messages([
     (
         "system",
         """You are an expert SQL engineer.
-Convert the natural language question into a **valid SQLite SELECT query** based on the schema.
+Convert the natural language question into a **valid PostgreSQL SELECT query** based on the schema.
 
 Guidelines:
 - Use table and column names exactly as provided.
 - Never modify schema names or add imaginary columns.
 - Only produce SELECT queries (read-only).
-- If a filter involves a year, use: STRFTIME('%Y', <date_column>) = 'YYYY'
+- Prefer ISO timestamps and PostgreSQL functions (e.g. EXTRACT(YEAR FROM column), DATE_TRUNC).
+- Use COALESCE or CAST only when needed and supported by PostgreSQL.
 - Return output ONLY in JSON format as follows:
 {format_instructions}
 """

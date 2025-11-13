@@ -1,9 +1,8 @@
 import logging
 import re
-import sqlite3
 from datetime import datetime
 from app.state.agent_state import GlobalState
-from app.utils import DB_PATH
+from app.utils import get_db_connection
 
 
 async def validation_node(state: GlobalState) -> GlobalState:
@@ -54,15 +53,13 @@ async def validation_node(state: GlobalState) -> GlobalState:
     # --- 3️⃣ Syntax Validation (Dry Run) ---
     validation_passed = True
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-
-        # SQLite “EXPLAIN” checks syntax without executing the query
-        cursor.execute(f"EXPLAIN {sql_query}")
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # PostgreSQL EXPLAIN checks syntax and generates a plan without executing
+                cursor.execute(f"EXPLAIN {sql_query}")
         explanation = "✅ SQL syntax is valid and query is read-only."
 
-    except sqlite3.Error as e:
+    except Exception as e:
         validation_passed = False
         msg = str(e)
         # Be nice to users in logs

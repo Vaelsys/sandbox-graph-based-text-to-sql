@@ -64,7 +64,7 @@ uvicorn app.main:app --reload
 ```
 ## 2️⃣ Run the Streamlit UI:
 ```text
-streamlit run app/ui/app.py
+streamlit run app/ui/stream_ui.py
 
 ```
 

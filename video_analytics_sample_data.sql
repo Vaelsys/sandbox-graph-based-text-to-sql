@@ -71,8 +71,8 @@ INSERT INTO license_plate_event (event_id, plate_number, plate_country, plate_st
 (2, 'XYZ5678', 'USA', 'Texas', 'passenger', 'car', 'black', 'Honda', 'Accord', 'entry', 0.9701),
 (3, 'DEF9012', 'USA', 'California', 'passenger', 'suv', 'white', 'Ford', 'Explorer', 'exit', 0.9589),
 
--- Day 2 events
-(4, 'GHI3456', 'USA', 'Nevada', 'passenger', 'car', 'blue', 'Chevrolet', 'Malibu', 'entry', 0.9712),
+-- Day 2 events (same plate at different locations)
+(4, 'ABC1234', 'USA', 'California', 'passenger', 'car', 'silver', 'Toyota', 'Camry', 'entry', 0.9712),
 (5, 'JKL7890', 'USA', 'California', 'passenger', 'car', 'red', 'Tesla', 'Model 3', 'entry', 0.9867),
 (6, 'MNO2345', 'USA', 'California', 'commercial', 'truck', 'white', 'Ford', 'F-150', 'entry', 0.9434),
 
@@ -81,9 +81,9 @@ INSERT INTO license_plate_event (event_id, plate_number, plate_country, plate_st
 (8, 'STU0123', 'USA', 'Arizona', 'passenger', 'suv', 'gray', 'Jeep', 'Grand Cherokee', 'exit', 0.9678),
 (9, 'VWX4567', 'USA', 'California', 'passenger', 'car', 'silver', 'Nissan', 'Altima', 'entry', 0.8912),
 
--- Day 4 events
-(10, 'YZA8901', 'USA', 'California', 'passenger', 'car', 'white', 'Hyundai', 'Elantra', 'entry', 0.9789),
-(11, 'BCD2345', 'USA', 'Oregon', 'passenger', 'car', 'blue', 'Mazda', 'CX-5', 'exit', 0.9545),
+-- Day 4 events (ABC1234 appears again in different location)
+(10, 'XYZ5678', 'USA', 'Texas', 'passenger', 'car', 'black', 'Honda', 'Accord', 'entry', 0.9789),
+(11, 'ABC1234', 'USA', 'California', 'passenger', 'car', 'silver', 'Toyota', 'Camry', 'exit', 0.9545),
 (12, 'EFG6789', 'USA', 'California', 'commercial', 'truck', 'yellow', 'Mercedes', 'Sprinter', 'entry', 0.9401),
 
 -- Day 5 events
@@ -95,15 +95,15 @@ INSERT INTO license_plate_event (event_id, plate_number, plate_country, plate_st
 (16, 'QRS2345', 'USA', 'California', 'passenger', 'car', 'white', 'Honda', 'Civic', 'exit', 0.9801),
 (17, 'TUV6789', 'USA', 'Nevada', 'passenger', 'car', 'silver', 'Toyota', 'Corolla', 'entry', 0.9223),
 
--- Day 7 events (yesterday)
-(18, 'WXY0123', 'USA', 'California', 'passenger', 'suv', 'blue', 'Subaru', 'Outback', 'entry', 0.9778),
+-- Day 7 events (yesterday) - JKL7890 appears in multiple locations same morning
+(18, 'JKL7890', 'USA', 'California', 'passenger', 'car', 'red', 'Tesla', 'Model 3', 'entry', 0.9778),
 (19, 'ZAB4567', 'USA', 'California', 'passenger', 'car', 'black', 'Tesla', 'Model Y', 'exit', 0.9689),
 (20, 'CDE8901', 'USA', 'California', 'commercial', 'truck', 'white', 'Isuzu', 'NPR', 'entry', 0.9512),
 
--- Today's events
+-- Today's events (FGH2345 appears in multiple locations same morning)
 (21, 'FGH2345', 'USA', 'California', 'passenger', 'car', 'red', 'Kia', 'Forte', 'entry', 0.9845),
 (22, 'IJK6789', 'USA', 'Arizona', 'passenger', 'suv', 'gray', 'Ford', 'Escape', 'exit', 0.9723),
-(23, 'LMN0123', 'USA', 'California', 'passenger', 'car', 'white', 'Chevrolet', 'Cruze', 'entry', 0.9601);
+(23, 'FGH2345', 'USA', 'California', 'passenger', 'car', 'red', 'Kia', 'Forte', 'entry', 0.9601);
 
 -- Add some archived/flagged events
 UPDATE event SET status = 'false_positive' WHERE id IN (9, 17);
@@ -114,3 +114,44 @@ UPDATE event SET status = 'archived' WHERE start_timestamp < NOW() - INTERVAL '6
 -- SELECT COUNT(*) as license_plate_events FROM license_plate_event;
 -- SELECT status, COUNT(*) FROM event GROUP BY status;
 -- SELECT COUNT(*) as today_events FROM event WHERE start_timestamp >= CURRENT_DATE;
+
+-- Query: Find cars detected at same morning in more than one location
+-- This will find plate numbers that appear multiple times on the same day before noon
+SELECT 
+    lpe.plate_number,
+    DATE(e.start_timestamp) as detection_date,
+    COUNT(DISTINCT e.source_id) as location_count,
+    COUNT(*) as total_detections,
+    ARRAY_AGG(DISTINCT s.name ORDER BY s.name) as locations,
+    MIN(e.start_timestamp) as first_seen,
+    MAX(e.start_timestamp) as last_seen
+FROM event e
+JOIN license_plate_event lpe ON e.id = lpe.event_id
+JOIN source s ON e.source_id = s.id
+WHERE EXTRACT(HOUR FROM e.start_timestamp) < 12  -- Morning only (before noon)
+GROUP BY lpe.plate_number, DATE(e.start_timestamp)
+HAVING COUNT(DISTINCT e.source_id) > 1
+ORDER BY detection_date DESC, total_detections DESC;
+
+-- Alternative query: Show detailed records for plates seen in multiple morning locations
+SELECT 
+    lpe.plate_number,
+    s.name as camera_location,
+    e.start_timestamp,
+    lpe.direction,
+    lpe.vehicle_make,
+    lpe.vehicle_model,
+    e.metadata->>'camera_zone' as zone
+FROM event e
+JOIN license_plate_event lpe ON e.id = lpe.event_id
+JOIN source s ON e.source_id = s.id
+WHERE lpe.plate_number IN (
+    SELECT plate_number
+    FROM event e2
+    JOIN license_plate_event lpe2 ON e2.id = lpe2.event_id
+    WHERE EXTRACT(HOUR FROM e2.start_timestamp) < 12
+    GROUP BY plate_number, DATE(e2.start_timestamp)
+    HAVING COUNT(DISTINCT e2.source_id) > 1
+)
+AND EXTRACT(HOUR FROM e.start_timestamp) < 12
+ORDER BY lpe.plate_number, e.start_timestamp;

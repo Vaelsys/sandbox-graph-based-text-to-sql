@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.config import embeddings, llm
 from app.state.agent_state import GlobalState
-from app.utils import extract_schema_from_db, BASE_DIR, DB_PATH
+from app.utils import extract_schema_from_db, BASE_DIR
 
 # ------------------------------------------------------------
 # Paths & Caching
@@ -70,7 +70,7 @@ async def schema_agent_node(state: GlobalState) -> GlobalState:
                 raise ValueError("Empty Chroma index; rebuilding...")
         except Exception as e:
             logging.warning(f"⚠️ Rebuilding Chroma index due to: {e}")
-            schema_docs = extract_schema_from_db(DB_PATH)
+            schema_docs = extract_schema_from_db()
             _vectorstore = build_schema_index(schema_docs)
 
     # Retrieve relevant schema documents

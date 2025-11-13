@@ -1,5 +1,7 @@
 import asyncio
 import json
+from datetime import date, datetime
+from decimal import Decimal
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
@@ -7,6 +9,15 @@ from app.graph.text_to_sql_graph import build_text_to_sql_graph
 from app.state.agent_state import GlobalState
 
 router = APIRouter()
+
+
+def _json_default(obj):
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    return str(obj)
+
 
 def format_agent_update(node_name: str, state: GlobalState) -> dict:
     """Generate structured agent update messages."""
@@ -88,7 +99,7 @@ async def query_stream(request: Request):
                 state.update(node_output)
 
                 update = format_agent_update(node_name, state)
-                yield json.dumps(update) + "\n"
+                yield json.dumps(update, default=_json_default) + "\n"
                 await asyncio.sleep(0.3)
 
         # Final result message
@@ -99,13 +110,13 @@ async def query_stream(request: Request):
                 "message": "✅ All agents completed successfully!",
                 "rows": final_rows,
                 "explanation": state.get("natural_language_explanation", "")
-            }) + "\n"
+            }, default=_json_default) + "\n"
         else:
             yield json.dumps({
                 "event": "complete",
                 "message": "⚠️ All agents finished but no data was returned.",
                 "rows": [],
                 "explanation": state.get("natural_language_explanation", "")
-            }) + "\n"
+            }, default=_json_default) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/json")

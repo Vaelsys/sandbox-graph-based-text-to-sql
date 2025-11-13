@@ -1,43 +1,50 @@
-import sqlite3
 import time
 import logging
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
+
+from psycopg.rows import dict_row  # type: ignore[import]
 
 from app.state.agent_state import GlobalState
-from app.utils import DB_PATH
+from app.utils import DATABASE_URL, get_db_connection
 
 
-def execute_sql_on_replica(sql_query: str, db_path: str):
+def _mask_database_url(database_url: str | None) -> str:
+    if not database_url:
+        return ""
+    parts = urlsplit(database_url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+
+
+def execute_sql_on_replica(sql_query: str, database_url: str | None = None):
     """
-    Executes a SQL query safely on a replica SQLite DB.
+    Executes a SQL query safely on a PostgreSQL DB.
     Returns columns, rows, and metadata.
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row  # to access columns by name
-    cursor = conn.cursor()
-
     try:
-        start = time.time()
-        cursor.execute(sql_query)
-        rows = cursor.fetchall()
-        execution_time = round(time.time() - start, 4)
+        with get_db_connection(database_url, row_factory=dict_row) as conn:
+            with conn.cursor() as cursor:
+                start = time.time()
+                cursor.execute(sql_query)
+                rows = cursor.fetchall()
+                execution_time = round(time.time() - start, 4)
 
-        # Extract column names
-        columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        result = [dict(row) for row in rows]
+                # Extract column names
+                columns = [desc.name for desc in cursor.description] if cursor.description else []
 
-        conn.close()
         return {
             "success": True,
             "columns": columns,
-            "rows": result,
-            "row_count": len(result),
+            "rows": rows,
+            "row_count": len(rows),
             "execution_time": execution_time,
             "error": None
         }
 
     except Exception as e:
-        conn.close()
         logging.error(f"⚠️ SQL execution failed: {e}")
         return {
             "success": False,
@@ -62,14 +69,14 @@ async def query_execution_node(state: GlobalState) -> GlobalState:
 
     logging.info(f"🚀 Executing SQL on replica: {sql_query}")
 
-    result = execute_sql_on_replica(sql_query, DB_PATH)
+    result = execute_sql_on_replica(sql_query, DATABASE_URL)
 
     # ---- Update History ----
     execution_history = state.get("execution_history", [])
     execution_history.append({
         "time": datetime.utcnow().isoformat(),
         "query": sql_query,
-        "db_path": DB_PATH,
+        "db_url": _mask_database_url(DATABASE_URL),
         "success": result["success"],
         "row_count": result["row_count"],
         "execution_time": result["execution_time"],
